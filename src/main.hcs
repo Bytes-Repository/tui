@@ -1,1 +1,765 @@
+// tui.hcs – biblioteka do tworzenia TUI (inspirowana BubbleTea)
+// Użycie: from [tui] require [Program, Component, Text, Button, Input, List, VStack, HStack, run, send]
 
+from [std] require [io, string, math]
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Typy pomocnicze
+// ──────────────────────────────────────────────────────────────────────────────
+
+enum Key
+    Char(u8)
+    Enter
+    Tab
+    Escape
+    Backspace
+    Delete
+    Home
+    End
+    PageUp
+    PageDown
+    Up
+    Down
+    Left
+    Right
+    CtrlA
+    CtrlB
+    CtrlC
+    CtrlD
+    CtrlE
+    CtrlF
+    CtrlH
+    CtrlK
+    CtrlL
+    CtrlN
+    CtrlP
+    CtrlU
+    CtrlW
+    Alt(u8)
+    Unknown
+end
+
+enum MouseEvent
+    Press(u8, u16, u16)   // button (0=left,1=middle,2=right), x, y
+    Release(u8, u16, u16)
+    Move(u16, u16)
+    WheelUp(u16, u16)
+    WheelDown(u16, u16)
+end
+
+enum Event
+    Key(Key)
+    Mouse(MouseEvent)
+    Resize(u16, u16)   // width, height
+    Quit
+    Custom(str)
+end
+
+struct Size
+    width: u16
+    height: u16
+end
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Interfejs komponentu
+// ──────────────────────────────────────────────────────────────────────────────
+
+obj Component
+    // Funkcje zwrotne (wypełniane przez konstruktory)
+    update: fn(comp: Component, event: Event) -> (Component, Event)  // zwraca nowy komponent i opcjonalny event do wysłania
+    view: fn(comp: Component, width: u16, height: u16) -> str
+    init: fn(comp: Component) -> Component
+    data: ptr // dowolne dane użytkownika
+end
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Stan programu
+// ──────────────────────────────────────────────────────────────────────────────
+
+obj Program
+    root: Component
+    size: Size
+    running: bool
+    event_queue: [Event]
+    raw_state: ptr  // stan terminala (opaque)
+end
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Funkcje terminalowe (extern C)
+// ──────────────────────────────────────────────────────────────────────────────
+
+extern
+    header [termios.h]
+    header [unistd.h]
+    header [sys/ioctl.h]
+    header [stdio.h]
+    header [signal.h]
+    header [fcntl.h]
+
+    type struct_termios
+    fn tcgetattr(i32 fd, ptr termios) : i32
+    fn tcsetattr(i32 fd, i32 actions, ptr termios) : i32
+    fn cfmakeraw(ptr termios)
+    fn write(i32 fd, ptr buf, u64 count) : i64
+    fn read(i32 fd, ptr buf, u64 count) : i64
+    fn ioctl(i32 fd, u64 request, ptr ws) : i32
+    struct winsize { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 }
+    const TIOCGWINSZ: u64 = 0x5413
+    fn signal(i32 sig, ptr handler) : ptr
+    fn kill(i32 pid, i32 sig) : i32
+    const SIGWINCH: i32 = 28
+    fn getpid() : i32
+end
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Stan terminala (do przechowywania oryginalnych ustawień)
+// ──────────────────────────────────────────────────────────────────────────────
+
+obj TerminalState
+    orig: [u8]   // bufor dla struct termios
+end
+
+fn enable_raw_mode() : TerminalState
+    direct
+        let state = HCS_ALLOC_ZERO(_scope_arena, TerminalState)
+        let orig = HCS_ALLOC_N(_scope_arena, u8, 64)
+        if tcgetattr(0, orig) != 0
+            return nil
+        end
+        // kopiuj
+        state.orig = orig
+        let raw = HCS_ALLOC_N(_scope_arena, u8, 64)
+        memcpy(raw, orig, 64)
+        cfmakeraw(raw)
+        if tcsetattr(0, 0, raw) != 0
+            return nil
+        end
+        return state
+    end
+end
+
+fn disable_raw_mode(state: TerminalState)
+    direct
+        tcsetattr(0, 0, state.orig)
+    end
+end
+
+fn get_terminal_size() : Size
+    direct
+        let ws: winsize
+        if ioctl(1, TIOCGWINSZ, &ws) == 0
+            return Size { width: ws.ws_col, height: ws.ws_row }
+        end
+        return Size { width: 80, height: 24 }
+    end
+end
+
+fn clear_screen()
+    direct
+        write(1, "\x1b[2J\x1b[H", 6)
+    end
+end
+
+fn hide_cursor()
+    direct
+        write(1, "\x1b[?25l", 6)
+    end
+end
+
+fn show_cursor()
+    direct
+        write(1, "\x1b[?25h", 6)
+    end
+end
+
+fn move_cursor(x: u16, y: u16)
+    direct
+        let mut buf = HCS_ALLOC_N(_scope_arena, u8, 32)
+        let n = snprintf(buf, 32, "\x1b[%d;%dH", y+1, x+1)
+        write(1, buf, n)
+    end
+end
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Parsowanie sekwencji escape (klawisze)
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn parse_escape(buf: [u8], pos: i64) : (Key, i64)
+    if pos >= buf.len
+        return (Key.Escape, 1)
+    end
+    let c = buf[pos]
+    if c == 91  // '['
+        if pos+1 >= buf.len
+            return (Key.Escape, 1)
+        end
+        let c2 = buf[pos+1]
+        if c2 == 65
+            return (Key.Up, 2)
+        else if c2 == 66
+            return (Key.Down, 2)
+        else if c2 == 67
+            return (Key.Right, 2)
+        else if c2 == 68
+            return (Key.Left, 2)
+        else if c2 == 72
+            return (Key.Home, 2)
+        else if c2 == 70
+            return (Key.End, 2)
+        else if c2 == 51 and pos+2 < buf.len and buf[pos+2] == 126
+            return (Key.Delete, 3)
+        else if c2 == 53 and pos+2 < buf.len and buf[pos+2] == 126
+            return (Key.PageUp, 3)
+        else if c2 == 54 and pos+2 < buf.len and buf[pos+2] == 126
+            return (Key.PageDown, 3)
+        end
+    end
+    return (Key.Unknown, 1)
+end
+
+fn read_event() : Event
+    direct
+        let mut buf = HCS_ALLOC_N(_scope_arena, u8, 8)
+        let n = read(0, buf, 1)
+        if n <= 0
+            return Event.Quit
+        end
+        let c = buf[0]
+        if c == 27  // ESC
+            let n2 = read(0, buf+1, 1)
+            if n2 > 0
+                let (key, used) = parse_escape(buf, 1)
+                if used > 1
+                    // ewentualnie zużyj dodatkowe bajty
+                end
+                return Event.Key(key)
+            end
+            return Event.Key(Key.Escape)
+        else if c == 10
+            return Event.Key(Key.Enter)
+        else if c == 9
+            return Event.Key(Key.Tab)
+        else if c == 127
+            return Event.Key(Key.Backspace)
+        else if c >= 1 and c <= 26
+            // Ctrl+litera
+            let key = match c
+                1 => Key.CtrlA
+                2 => Key.CtrlB
+                3 => Key.CtrlC
+                4 => Key.CtrlD
+                5 => Key.CtrlE
+                6 => Key.CtrlF
+                8 => Key.CtrlH
+                11 => Key.CtrlK
+                12 => Key.CtrlL
+                14 => Key.CtrlN
+                16 => Key.CtrlP
+                21 => Key.CtrlU
+                23 => Key.CtrlW
+                _ => Key.Unknown
+            end
+            return Event.Key(key)
+        else
+            return Event.Key(Key.Char(c))
+        end
+    end
+end
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Program główny
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn program_new(root: Component) : Program
+    let p = HCS_ALLOC_ZERO(_scope_arena, Program)
+    p.root = root
+    p.size = get_terminal_size()
+    p.running = true
+    p.event_queue = []
+    p.raw_state = nil
+    return p
+end
+
+fn program_send(p: Program, event: Event)
+    p.event_queue.push(event)
+end
+
+fn program_run(p: Program) : i32
+    // inicjalizacja
+    p.raw_state = enable_raw_mode()
+    if p.raw_state == nil
+        eprintln("Failed to enable raw mode")
+        return 1
+    end
+    hide_cursor()
+    clear_screen()
+
+    // wywołaj init na korzeniu
+    p.root = p.root.init(p.root)
+
+    let mut last_size = p.size
+
+    while p.running
+        // sprawdź rozmiar okna
+        let sz = get_terminal_size()
+        if sz.width != last_size.width or sz.height != last_size.height
+            p.size = sz
+            last_size = sz
+            program_send(p, Event.Resize(sz.width, sz.height))
+        end
+
+        // przetwarzanie zdarzeń
+        if p.event_queue.len == 0
+            let ev = read_event()
+            if ev == Event.Quit
+                p.running = false
+                break
+            end
+            program_send(p, ev)
+        end
+
+        // przetwarzanie wszystkich zdarzeń w kolejce
+        while p.event_queue.len > 0
+            let ev = p.event_queue[0]
+            // usuń pierwszy element
+            let mut new_q = [] as [Event]
+            for i in 1..p.event_queue.len
+                new_q.push(p.event_queue[i])
+            end
+            p.event_queue = new_q
+
+            let (new_root, cmd) = p.root.update(p.root, ev)
+            p.root = new_root
+            if cmd != nil
+                // w tej wersji cmd jest po prostu eventem do wysłania
+                program_send(p, cmd)
+            end
+        end
+
+        // renderowanie
+        let view = p.root.view(p.root, p.size.width, p.size.height)
+        // wyczyść ekran i narysuj
+        move_cursor(0, 0)
+        direct {
+            write(1, "\x1b[2J", 4);
+        }
+        direct {
+            write(1, view.ptr, view.len);
+        }
+        fflush(stdout)
+    end
+
+    show_cursor()
+    disable_raw_mode(p.raw_state)
+    return 0
+end
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Komponenty podstawowe
+// ──────────────────────────────────────────────────────────────────────────────
+
+// ---------- Text ----------
+obj TextData
+    content: str
+    color: str
+end
+
+fn text_new(content: str) : Component
+    let comp = HCS_ALLOC_ZERO(_scope_arena, Component)
+    let data = HCS_ALLOC_ZERO(_scope_arena, TextData)
+    data.content = content
+    data.color = ""
+    comp.data = data
+    comp.update = text_update
+    comp.view = text_view
+    comp.init = text_init
+    return comp
+end
+
+fn text_set_color(comp: Component, color: str)
+    let data = comp.data as TextData
+    data.color = color
+end
+
+fn text_update(comp: Component, ev: Event) -> (Component, Event)
+    // tekst nie reaguje na zdarzenia
+    return (comp, nil)
+end
+
+fn text_view(comp: Component, width: u16, height: u16) -> str
+    let data = comp.data as TextData
+    let mut out = data.color + data.content + "\x1b[0m"
+    // proste zawijanie, jeśli dłuższe niż szerokość
+    if out.len > width
+        out = out.ptr[0..width] as str
+    end
+    return out
+end
+
+fn text_init(comp: Component) -> Component
+    return comp
+end
+
+// ---------- Button ----------
+obj ButtonData
+    label: str
+    focused: bool
+    on_click: fn(comp: Component) -> Event
+    color_focused: str
+    color_normal: str
+end
+
+fn button_new(label: str, on_click: fn(comp: Component) -> Event) : Component
+    let comp = HCS_ALLOC_ZERO(_scope_arena, Component)
+    let data = HCS_ALLOC_ZERO(_scope_arena, ButtonData)
+    data.label = label
+    data.focused = false
+    data.on_click = on_click
+    data.color_focused = "\x1b[7m"  // odwrócone
+    data.color_normal = ""
+    comp.data = data
+    comp.update = button_update
+    comp.view = button_view
+    comp.init = button_init
+    return comp
+end
+
+fn button_update(comp: Component, ev: Event) -> (Component, Event)
+    let data = comp.data as ButtonData
+    match ev
+        Event.Key(Key.Enter) | Event.Key(Key.Char(32)) => // spacja
+            if data.focused
+                let cmd = data.on_click(comp)
+                return (comp, cmd)
+            end
+        Event.Key(Key.Tab) =>
+            data.focused = not data.focused
+        _ => {}
+    end
+    return (comp, nil)
+end
+
+fn button_view(comp: Component, width: u16, height: u16) -> str
+    let data = comp.data as ButtonData
+    let color = if data.focused then data.color_focused else data.color_normal
+    return color + "[" + data.label + "]" + "\x1b[0m"
+end
+
+fn button_init(comp: Component) -> Component
+    return comp
+end
+
+// ---------- Input ----------
+obj InputData
+    text: str
+    cursor_pos: i64
+    focused: bool
+    placeholder: str
+end
+
+fn input_new(placeholder: str) : Component
+    let comp = HCS_ALLOC_ZERO(_scope_arena, Component)
+    let data = HCS_ALLOC_ZERO(_scope_arena, InputData)
+    data.text = ""
+    data.cursor_pos = 0
+    data.focused = false
+    data.placeholder = placeholder
+    comp.data = data
+    comp.update = input_update
+    comp.view = input_view
+    comp.init = input_init
+    return comp
+end
+
+fn input_update(comp: Component, ev: Event) -> (Component, Event)
+    let data = comp.data as InputData
+    match ev
+        Event.Key(Key.Tab) =>
+            data.focused = not data.focused
+        Event.Key(Key.Enter) =>
+            if data.focused
+                return (comp, Event.Custom("submit"))
+            end
+        Event.Key(Key.Backspace) =>
+            if data.focused and data.cursor_pos > 0
+                let before = data.text.ptr[0..data.cursor_pos-1] as str
+                let after = data.text.ptr[data.cursor_pos..] as str
+                data.text = before + after
+                data.cursor_pos -= 1
+            end
+        Event.Key(Key.Delete) =>
+            if data.focused and data.cursor_pos < data.text.len
+                let before = data.text.ptr[0..data.cursor_pos] as str
+                let after = data.text.ptr[data.cursor_pos+1..] as str
+                data.text = before + after
+            end
+        Event.Key(Key.Left) =>
+            if data.focused and data.cursor_pos > 0
+                data.cursor_pos -= 1
+            end
+        Event.Key(Key.Right) =>
+            if data.focused and data.cursor_pos < data.text.len
+                data.cursor_pos += 1
+            end
+        Event.Key(Key.Home) =>
+            if data.focused
+                data.cursor_pos = 0
+            end
+        Event.Key(Key.End) =>
+            if data.focused
+                data.cursor_pos = data.text.len
+            end
+        Event.Key(Key.Char(c)) =>
+            if data.focused
+                let ch = c as char
+                let before = data.text.ptr[0..data.cursor_pos] as str
+                let after = data.text.ptr[data.cursor_pos..] as str
+                data.text = before + ch + after
+                data.cursor_pos += 1
+            end
+        _ => {}
+    end
+    return (comp, nil)
+end
+
+fn input_view(comp: Component, width: u16, height: u16) -> str
+    let data = comp.data as InputData
+    let display = if data.text.len == 0 { data.placeholder } else { data.text }
+    let cursor = if data.focused
+        // pokaż kursor jako podkreślnik (lub odwrócony)
+        // w tej wersji uproszczone – pokażemy tylko tekst
+        display
+    else
+        display
+    end
+    // obramowanie
+    let border = "┌" + "-" * (width-2) + "┐\n"
+    let line = "│" + (cursor + " " * (width-2-cursor.len)).ptr[0..width-2] as str + "│\n"
+    let bottom = "└" + "-" * (width-2) + "┘"
+    return border + line + bottom
+end
+
+fn input_init(comp: Component) -> Component
+    return comp
+end
+
+// ---------- List ----------
+obj ListData
+    items: [str]
+    selected: i64
+    focused: bool
+end
+
+fn list_new(items: [str]) : Component
+    let comp = HCS_ALLOC_ZERO(_scope_arena, Component)
+    let data = HCS_ALLOC_ZERO(_scope_arena, ListData)
+    data.items = items
+    data.selected = 0
+    data.focused = false
+    comp.data = data
+    comp.update = list_update
+    comp.view = list_view
+    comp.init = list_init
+    return comp
+end
+
+fn list_update(comp: Component, ev: Event) -> (Component, Event)
+    let data = comp.data as ListData
+    match ev
+        Event.Key(Key.Tab) =>
+            data.focused = not data.focused
+        Event.Key(Key.Up) =>
+            if data.focused and data.selected > 0
+                data.selected -= 1
+            end
+        Event.Key(Key.Down) =>
+            if data.focused and data.selected + 1 < data.items.len
+                data.selected += 1
+            end
+        Event.Key(Key.Enter) =>
+            if data.focused
+                return (comp, Event.Custom("selected:" + data.items[data.selected]))
+            end
+        _ => {}
+    end
+    return (comp, nil)
+end
+
+fn list_view(comp: Component, width: u16, height: u16) -> str
+    let data = comp.data as ListData
+    let mut out = "" as str
+    for i in 0..data.items.len
+        let line = if i == data.selected and data.focused
+            "> " + data.items[i]
+        else if i == data.selected
+            "  " + data.items[i] + "  (selected)"
+        else
+            "  " + data.items[i]
+        end
+        out += line + "\n"
+        if out.len > height*width
+            break
+        end
+    end
+    return out
+end
+
+fn list_init(comp: Component) -> Component
+    return comp
+end
+
+// ---------- VStack ----------
+obj VStackData
+    children: [Component]
+    spacing: u16
+end
+
+fn vstack_new(children: [Component]) : Component
+    let comp = HCS_ALLOC_ZERO(_scope_arena, Component)
+    let data = HCS_ALLOC_ZERO(_scope_arena, VStackData)
+    data.children = children
+    data.spacing = 1
+    comp.data = data
+    comp.update = vstack_update
+    comp.view = vstack_view
+    comp.init = vstack_init
+    return comp
+end
+
+fn vstack_update(comp: Component, ev: Event) -> (Component, Event)
+    let data = comp.data as VStackData
+    let mut updated = false
+    let mut cmd = nil as Event
+    for i in 0..data.children.len
+        let (new_child, child_cmd) = data.children[i].update(data.children[i], ev)
+        if new_child != data.children[i]
+            data.children[i] = new_child
+            updated = true
+        end
+        if child_cmd != nil
+            cmd = child_cmd
+        end
+    end
+    if updated
+        return (comp, cmd)
+    end
+    return (comp, cmd)
+end
+
+fn vstack_view(comp: Component, width: u16, height: u16) -> str
+    let data = comp.data as VStackData
+    let mut out = "" as str
+    let available = height
+    let per_child = (available - (data.children.len-1)*data.spacing) / data.children.len
+    let mut y = 0
+    for i in 0..data.children.len
+        let child_height = if i == data.children.len-1 { available - y } else { per_child }
+        let view = data.children[i].view(data.children[i], width, child_height)
+        out += view
+        if i < data.children.len-1
+            out += "\n" * data.spacing
+        end
+        y += child_height + data.spacing
+    end
+    return out
+end
+
+fn vstack_init(comp: Component) -> Component
+    let data = comp.data as VStackData
+    for i in 0..data.children.len
+        data.children[i] = data.children[i].init(data.children[i])
+    end
+    return comp
+end
+
+// ---------- HStack ----------
+obj HStackData
+    children: [Component]
+    spacing: u16
+end
+
+fn hstack_new(children: [Component]) : Component
+    let comp = HCS_ALLOC_ZERO(_scope_arena, Component)
+    let data = HCS_ALLOC_ZERO(_scope_arena, HStackData)
+    data.children = children
+    data.spacing = 1
+    comp.data = data
+    comp.update = hstack_update
+    comp.view = hstack_view
+    comp.init = hstack_init
+    return comp
+end
+
+fn hstack_update(comp: Component, ev: Event) -> (Component, Event)
+    let data = comp.data as HStackData
+    let mut updated = false
+    let mut cmd = nil as Event
+    for i in 0..data.children.len
+        let (new_child, child_cmd) = data.children[i].update(data.children[i], ev)
+        if new_child != data.children[i]
+            data.children[i] = new_child
+            updated = true
+        end
+        if child_cmd != nil
+            cmd = child_cmd
+        end
+    end
+    if updated
+        return (comp, cmd)
+    end
+    return (comp, cmd)
+end
+
+fn hstack_view(comp: Component, width: u16, height: u16) -> str
+    let data = comp.data as HStackData
+    let mut out = "" as str
+    let available = width
+    let per_child = (available - (data.children.len-1)*data.spacing) / data.children.len
+    let mut x = 0
+    for i in 0..data.children.len
+        let child_width = if i == data.children.len-1 { available - x } else { per_child }
+        let view = data.children[i].view(data.children[i], child_width, height)
+        // obcięcie linii
+        let lines = split(view, "\n")
+        for line in lines
+            let trimmed = line.ptr[0..child_width] as str
+            out += trimmed
+            out += " " * (child_width - trimmed.len)
+            out += "\n"
+        end
+        if i < data.children.len-1
+            out += " " * data.spacing
+        end
+        x += child_width + data.spacing
+    end
+    return out
+end
+
+fn hstack_init(comp: Component) -> Component
+    let data = comp.data as HStackData
+    for i in 0..data.children.len
+        data.children[i] = data.children[i].init(data.children[i])
+    end
+    return comp
+end
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Przykład użycia (komentarz)
+// ──────────────────────────────────────────────────────────────────────────────
+/*
+from [tui] require [program_new, program_run, text_new, button_new, input_new, list_new, vstack_new, hstack_new]
+
+fn on_button_click(comp: Component) -> Event
+    return Event.Custom("button clicked")
+end
+
+fn main() : i32
+    let text = text_new("Hello, TUI!")
+    let btn = button_new("Click me", on_button_click)
+    let input = input_new("Type here...")
+    let list = list_new(["Apple", "Banana", "Cherry"])
+    let root = vstack_new([text, btn, input, list])
+    let prog = program_new(root)
+    return program_run(prog)
+end
+*/
