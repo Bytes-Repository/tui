@@ -1,0 +1,48 @@
+use "bytes -> tui" from "tui"
+
+struct Model is
+    pub tasks: any
+    pub progress: any
+    pub timer: any
+end
+
+fn init() -> any is
+    let tasks: any = tui::list_new(["Design the API", "Write the renderer", "Ship the docs", "Drink coffee"])
+    let progress: any = tui::progress_set(tui::progress_new(24), 35)
+    return Model { tasks: tasks, progress: progress, timer: tui::timer_new() }
+end
+
+fn update(model: any, msg: any) -> any is
+    if tui::is_ctrl_c(msg) || tui::msg_is_key(msg, "q") is
+        return (model, tui::cmd_quit())
+    end
+
+    if tui::msg_is_key(msg, "space") is
+        let bumped: any = tui::progress_set(model.progress, tui::progress_percent(model.progress) + 5)
+        return (Model { tasks: model.tasks, progress: bumped, timer: model.timer }, tui::cmd_none())
+    end
+
+    let next_tasks: any = tui::list_update(model.tasks, msg)
+    return (Model { tasks: next_tasks, progress: model.progress, timer: model.timer }, tui::cmd_none())
+end
+
+fn view(model: any) -> string is
+    let title_style: any = tui::style_bold(tui::style_fg(tui::style_new(), "cyan"), true)
+    let panel: any = tui::style_padding(tui::style_border(tui::style_new(), "rounded"), 2, 1)
+
+    let left: string = tui::style_render(title_style, "Tasks") + "\n\n" + tui::list_view(model.tasks)
+    let right: string = tui::style_render(title_style, "Progress") + "\n\n" +
+        tui::progress_view(model.progress) + "\n\n" +
+        tui::style_render(title_style, "Elapsed") + "\n" + tui::timer_view(model.timer)
+
+    let body: string = tui::join_horizontal([tui::style_render(panel, left), tui::style_render(panel, right)], 2)
+    let help: string = tui::help_view(
+        ["↑/↓", "space", "q"],
+        ["move", "bump progress", "quit"]
+    )
+    return body + "\n" + help
+end
+
+fn main() is
+    tui::run(init, update, view)
+end
