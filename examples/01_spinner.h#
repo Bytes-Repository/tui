@@ -1,0 +1,36 @@
+use "bytes -> tui" from "tui"
+
+struct Model is
+    pub spinner: any
+    pub count: int
+end
+
+fn init() -> any is
+    return Model { spinner: tui::spinner_new("dot"), count: 0 }
+end
+
+fn update(model: any, msg: any) -> any is
+    if tui::is_ctrl_c(msg) || tui::msg_is_key(msg, "q") is
+        return (model, tui::cmd_quit())
+    end
+    if tui::msg_is_tick(msg) is
+        let next: any = Model { spinner: tui::spinner_tick(model.spinner), count: model.count + 1 }
+        return (next, tui::cmd_none())
+    end
+    return (model, tui::cmd_none())
+end
+
+fn view(model: any) -> string is
+    let title: any = tui::style_bold(tui::style_fg(tui::style_new(), "cyan"), true)
+    let box_: any = tui::style_padding(tui::style_border(tui::style_new(), "rounded"), 2, 1)
+
+    let line1: string = tui::style_render(title, "tui — spinner example")
+    let line2: string = tui::spinner_view(model.spinner) + "  working... (tick " + to_string(model.count) + ")"
+    let line3: string = tui::help_view(["q", "ctrl+c"], ["quit", "quit"])
+
+    return tui::style_render(box_, line1 + "\n\n" + line2 + "\n\n" + line3)
+end
+
+fn main() is
+    tui::run(init, update, view)
+end
