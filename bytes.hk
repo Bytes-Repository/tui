@@ -1,1 +1,14 @@
+[package]
+-> name        => tui
+-> version     => 0.1.0
+-> description => Bubble Tea-inspired terminal UI toolkit for H# — Model/Update/View program loop, ANSI styling, and reusable components (spinner, progress bar, text input, list, viewport, paginator, help bar, timer). 100% H#, no `extern` FFI.
+-> author      => Bytes Developers
+-> license     => MIT
 
+[build]
+-> lang   => h#
+-> entry  => src/lib.h#
+-> output => build/libtui
+-> emit   => lib
+
+[deps]
