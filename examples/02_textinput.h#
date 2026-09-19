@@ -1,0 +1,54 @@
+use "bytes -> tui" from "tui"
+
+struct Model is
+    pub input: any
+    pub submitted: string   ;; "" until enter is pressed
+end
+
+fn init() -> any is
+    let ti: any = tui::textinput_focus(tui::textinput_new("your name..."), true)
+    return Model { input: ti, submitted: "" }
+end
+
+fn update(model: any, msg: any) -> any is
+    if tui::is_ctrl_c(msg) is
+        return (model, tui::cmd_quit())
+    end
+
+    if model.submitted != "" is
+        if tui::msg_is_key(msg, "q") || tui::msg_is_key(msg, "enter") is
+            return (model, tui::cmd_quit())
+        end
+        return (model, tui::cmd_none())
+    end
+
+    if tui::msg_is_key(msg, "enter") is
+        let name: string = tui::textinput_value(model.input)
+        if name != "" is
+            return (Model { input: model.input, submitted: name }, tui::cmd_none())
+        end
+        return (model, tui::cmd_none())
+    end
+
+    let next_input: any = tui::textinput_update(model.input, msg)
+    return (Model { input: next_input, submitted: model.submitted }, tui::cmd_none())
+end
+
+fn view(model: any) -> string is
+    let title: any = tui::style_bold(tui::style_fg(tui::style_new(), "cyan"), true)
+    let box_: any = tui::style_padding(tui::style_border(tui::style_new(), "rounded"), 2, 1)
+
+    if model.submitted != "" is
+        let msg: string = tui::style_render(title, "Hello, " + model.submitted + "!")
+        return tui::style_render(box_, msg + "\n\n" + tui::help_view(["q", "enter"], ["quit", "quit"]))
+    end
+
+    let prompt: string = tui::style_render(title, "What's your name?")
+    let field: string = "> " + tui::textinput_view(model.input)
+    let hint: string = tui::help_view(["enter", "ctrl+c"], ["submit", "quit"])
+    return tui::style_render(box_, prompt + "\n\n" + field + "\n\n" + hint)
+end
+
+fn main() is
+    tui::run(init, update, view)
+end
