@@ -1,1 +1,1449 @@
+fn clampi(n: int, lo: int, hi: int) -> int is
+    if n < lo is return lo end
+    if n > hi is return hi end
+    return n
+end
 
+fn maxi(a: int, b: int) -> int is
+    if a > b is return a end
+    return b
+end
+
+fn mini(a: int, b: int) -> int is
+    if a < b is return a end
+    return b
+end
+
+fn is_ws_ch(ch: string) -> bool is
+    return ch == " " || ch == "\t" || ch == "\n" || ch == "\r"
+end
+
+;; NOTE ON UNICODE: `s.len()` returns the *byte* length of `s` (UTF-8),
+;; while `s[i..j]` slices by *character* — so anything that needs an
+;; actual character count (padding math, cursor movement, ...) uses this
+;; instead of `.len()`. `.len()` is still fine, and used below, as a safe
+;; *upper bound* in a slice's end index (e.g. `s[i..s.len()]` for "rest of
+;; the string") since out-of-range slice ends just clamp to the real
+;; length rather than panicking.
+fn char_count(s: string) -> int is
+    let mut i: int = 0
+    while s[i..i + 1] != "" is
+        i = i + 1
+    end
+    return i
+end
+
+fn trim_str(s: string) -> string is
+    let n: int = char_count(s)
+    let mut i: int = 0
+    while i < n && is_ws_ch(s[i..i + 1]) is
+        i = i + 1
+    end
+    let mut j: int = n
+    while j > i && is_ws_ch(s[j - 1..j]) is
+        j = j - 1
+    end
+    return s[i..j]
+end
+
+fn rep_str(s: string, n: int) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < n is
+        out = out + s
+        i = i + 1
+    end
+    return out
+end
+
+fn pad_right(s: string, width: int) -> string is
+    let diff: int = width - visible_len(s)
+    if diff <= 0 is return s end
+    return s + rep_str(" ", diff)
+end
+
+fn pad_left(s: string, width: int) -> string is
+    let diff: int = width - visible_len(s)
+    if diff <= 0 is return s end
+    return rep_str(" ", diff) + s
+end
+
+fn pad_center(s: string, width: int) -> string is
+    let diff: int = width - visible_len(s)
+    if diff <= 0 is return s end
+    let left: int = diff / 2
+    let right: int = diff - left
+    return rep_str(" ", left) + s + rep_str(" ", right)
+end
+
+fn is_digit_ch(ch: string) -> bool is
+    return ch == "0" || ch == "1" || ch == "2" || ch == "3" || ch == "4" ||
+           ch == "5" || ch == "6" || ch == "7" || ch == "8" || ch == "9"
+end
+
+fn is_all_digits(s: string) -> bool is
+    let n: int = s.len()
+    if n == 0 is return false end
+    let mut i: int = 0
+    while i < n is
+        if !is_digit_ch(s[i..i + 1]) is return false end
+        i = i + 1
+    end
+    return true
+end
+
+fn hex_digit_val(ch: string) -> int is
+    if ch == "0" is return 0 end
+    if ch == "1" is return 1 end
+    if ch == "2" is return 2 end
+    if ch == "3" is return 3 end
+    if ch == "4" is return 4 end
+    if ch == "5" is return 5 end
+    if ch == "6" is return 6 end
+    if ch == "7" is return 7 end
+    if ch == "8" is return 8 end
+    if ch == "9" is return 9 end
+    if ch == "a" || ch == "A" is return 10 end
+    if ch == "b" || ch == "B" is return 11 end
+    if ch == "c" || ch == "C" is return 12 end
+    if ch == "d" || ch == "D" is return 13 end
+    if ch == "e" || ch == "E" is return 14 end
+    if ch == "f" || ch == "F" is return 15 end
+    return 0
+end
+
+fn hex_pair_val(s: string, i: int) -> int is
+    return hex_digit_val(s[i..i + 1]) * 16 + hex_digit_val(s[i + 1..i + 2])
+end
+
+;; Strip ANSI SGR escape sequences ("\x1b[...m") so width/padding math is
+;; done against what actually shows up on screen, not the byte count.
+fn strip_ansi(s: string) -> string is
+    let n: int = char_count(s)
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < n is
+        let ch: string = s[i..i + 1]
+        if ch == "\x1b" is
+            let mut j: int = i + 1
+            if j < n && s[j..j + 1] == "[" is
+                j = j + 1
+                while j < n && s[j..j + 1] != "m" is
+                    j = j + 1
+                end
+                if j < n is j = j + 1 end
+            end
+            i = j
+        else is
+            out = out + ch
+            i = i + 1
+        end
+    end
+    return out
+end
+
+fn visible_len(s: string) -> int is
+    return char_count(strip_ansi(s))
+end
+
+
+;; ── low-level terminal control ──────────────────────────────────────────
+
+fn write_raw(s: string) is
+    __builtin_io_write_no_nl(s)
+end
+
+fn flush_out() is
+    __builtin_io_flush()
+end
+
+;; Terminal width in columns (best-effort; falls back to 80 if it can't be
+;; determined, e.g. when stdout isn't a real tty).
+pub fn term_width() -> int is
+    let out: string = trim_str(__builtin_process_run("stty size -F /dev/tty 2>/dev/null"))
+    if out == "" is return 80 end
+    let parts: [string] = str_split(out, " ")
+    if parts.len() < 2 is return 80 end
+    let w: int = __builtin_conv_str_to_int(parts[1])
+    if w <= 0 is return 80 end
+    return w
+end
+
+;; Terminal height in rows (best-effort; falls back to 24).
+pub fn term_height() -> int is
+    let out: string = trim_str(__builtin_process_run("stty size -F /dev/tty 2>/dev/null"))
+    if out == "" is return 24 end
+    let parts: [string] = str_split(out, " ")
+    if parts.len() < 1 is return 24 end
+    let h: int = __builtin_conv_str_to_int(parts[0])
+    if h <= 0 is return 24 end
+    return h
+end
+
+;; (width, height) in one call — one `stty` shell-out instead of two.
+pub fn term_size() -> (int, int) is
+    let out: string = trim_str(__builtin_process_run("stty size -F /dev/tty 2>/dev/null"))
+    if out == "" is return (80, 24) end
+    let parts: [string] = str_split(out, " ")
+    if parts.len() < 2 is return (80, 24) end
+    let h: int = __builtin_conv_str_to_int(parts[0])
+    let w: int = __builtin_conv_str_to_int(parts[1])
+    if w <= 0 is return (80, 24) end
+    if h <= 0 is return (80, 24) end
+    return (w, h)
+end
+
+;; Put the terminal into raw mode: no line buffering, no local echo, and a
+;; ~100ms read timeout (`min 0 time 1`) so a single key-read never blocks
+;; the render loop for long — this is what gives `poll_key` its "is a key
+;; available right now" polling behaviour, and it's also what drives the
+;; program loop's own ~10Hz tick cadence when no key is pressed. `opost
+;; onlcr` is re-enabled on top of `raw` so this program's own "\n" bytes
+;; still come out as "\r\n" — `raw` alone turns that off, which without
+;; this would stair-step every line of output.
+;;
+;; Returns the terminal's previous settings (from `stty -g`) — hang on to
+;; this and pass it to `disable_raw_mode` to restore the user's shell
+;; exactly as it was, rather than guessing with `stty sane`.
+pub fn enable_raw_mode() -> string is
+    let saved: string = trim_str(__builtin_process_run("stty -g -F /dev/tty 2>/dev/null"))
+    let _r: string = __builtin_process_run("stty raw -echo min 0 time 1 opost onlcr -F /dev/tty 2>/dev/null")
+    return saved
+end
+
+;; Restore whatever `enable_raw_mode` returned. Falls back to `stty sane`
+;; if `saved` is empty (e.g. stdout wasn't a real tty to begin with).
+pub fn disable_raw_mode(saved: string) is
+    if saved != "" is
+        let _r: string = __builtin_process_run("stty '" + saved + "' -F /dev/tty 2>/dev/null")
+    else is
+        let _r2: string = __builtin_process_run("stty sane -F /dev/tty 2>/dev/null")
+    end
+end
+
+pub fn enter_alt_screen() is
+    write_raw("\x1b[?1049h")
+end
+
+pub fn exit_alt_screen() is
+    write_raw("\x1b[?1049l")
+end
+
+pub fn hide_cursor() is
+    write_raw("\x1b[?25l")
+end
+
+pub fn show_cursor() is
+    write_raw("\x1b[?25h")
+end
+
+pub fn clear_screen() is
+    write_raw("\x1b[2J\x1b[H")
+end
+
+pub fn move_home() is
+    write_raw("\x1b[H")
+end
+
+pub fn move_to(row: int, col: int) is
+    write_raw("\x1b[" + to_string(row) + ";" + to_string(col) + "H")
+end
+
+pub fn bell() is
+    write_raw("\x07")
+end
+
+pub fn set_title(title: string) is
+    write_raw("\x1b]0;" + title + "\x07")
+end
+
+;; Write a full frame: cursor home + the given text, flushed immediately.
+;; Used internally by `run`, exposed for callers rolling their own loop.
+pub fn draw(frame: string) is
+    write_raw("\x1b[H\x1b[2J")
+    write_raw(frame)
+    flush_out()
+end
+
+
+;; ── keyboard input ───────────────────────────────────────────────────────
+;;
+;; Key names this library produces: "up" "down" "left" "right" "home" "end"
+;; "pgup" "pgdown" "delete" "backspace" "tab" "enter" "esc" "space"
+;; "ctrl+c" "ctrl+a" "ctrl+e" "ctrl+d" "ctrl+u" "ctrl+k" "ctrl+w", or a plain
+;; single printable character ("a", "Z", "1", "?", ...).
+
+fn read_one_byte() -> string is
+    return __builtin_io_read_char()
+end
+
+;; Try to read one key. Under `enable_raw_mode`'s `time 1` setting this
+;; returns "" after ~100ms if nothing was pressed, and the parsed key name
+;; otherwise. This is the non-blocking poll `run`'s main loop uses.
+pub fn poll_key() -> string is
+    let c1: string = read_one_byte()
+    if c1 == "" is return "" end
+    if c1 == "\x1b" is
+        let c2: string = read_one_byte()
+        if c2 == "" is return "esc" end
+        if c2 == "[" || c2 == "O" is
+            let c3: string = read_one_byte()
+            if c3 == "A" is return "up" end
+            if c3 == "B" is return "down" end
+            if c3 == "C" is return "right" end
+            if c3 == "D" is return "left" end
+            if c3 == "H" is return "home" end
+            if c3 == "F" is return "end" end
+            if c3 == "3" is
+                let _c4: string = read_one_byte()
+                return "delete"
+            end
+            if c3 == "5" is
+                let _c4: string = read_one_byte()
+                return "pgup"
+            end
+            if c3 == "6" is
+                let _c4: string = read_one_byte()
+                return "pgdown"
+            end
+            return "esc"
+        end
+        return "esc"
+    end
+    if c1 == "\r" || c1 == "\n" is return "enter" end
+    if c1 == "\t" is return "tab" end
+    if c1 == "\x7f" || c1 == "\x08" is return "backspace" end
+    if c1 == "\x03" is return "ctrl+c" end
+    if c1 == "\x01" is return "ctrl+a" end
+    if c1 == "\x05" is return "ctrl+e" end
+    if c1 == "\x04" is return "ctrl+d" end
+    if c1 == "\x15" is return "ctrl+u" end
+    if c1 == "\x0b" is return "ctrl+k" end
+    if c1 == "\x17" is return "ctrl+w" end
+    if c1 == " " is return "space" end
+
+    ;; Multi-byte UTF-8 lead byte (e.g. the first byte of "ą", "ł", "€", an
+    ;; emoji, ...) — consume exactly as many continuation bytes as the lead
+    ;; byte says, so one physical keypress reliably becomes one `poll_key()`
+    ;; result instead of being split into several confusing fragments.
+    ;;
+    ;; KNOWN INTERPRETER BUG — verified against the actual H# interpreter
+    ;; source, not a guess: `__builtin_io_read_char` returns
+    ;; `(byte as char).to_string()`, which is only a correct byte<->char
+    ;; mapping for ASCII (0-127). For a byte >= 128 it produces a
+    ;; *different* multi-byte re-encoding of that byte's Latin-1 code
+    ;; point instead of the original raw byte, so the numeric value this
+    ;; block keys off of (`code`, below) survives, but the actual bytes
+    ;; making up the reassembled string don't — a real non-ASCII key
+    ;; still reads back as exactly one `poll_key()` event (so it won't
+    ;; visually double up or desync later keys), but its *text* comes
+    ;; through corrupted rather than as the real character. Concretely:
+    ;; typing "ą" will not insert "ą" into a `textinput`. Plain ASCII
+    ;; input (everything else in this function) is unaffected and has
+    ;; been verified byte-for-byte correct. There is nothing this library
+    ;; can do about the corruption itself from H# code — fixing it needs
+    ;; `__builtin_io_read_char` itself changed to read raw bytes without
+    ;; going through `char`.
+    let code: int = __builtin_str_to_char_code(c1)
+    let extra: int = utf8_extra_bytes(code)
+    if extra > 0 is
+        let mut ch: string = c1
+        let mut k: int = 0
+        while k < extra is
+            ch = ch + read_one_byte()
+            k = k + 1
+        end
+        return ch
+    end
+
+    return c1
+end
+
+fn utf8_extra_bytes(code: int) -> int is
+    if code >= 240 is return 3 end
+    if code >= 224 is return 2 end
+    if code >= 192 is return 1 end
+    return 0
+end
+
+;; True for every key name `poll_key` produces that ISN'T a plain
+;; printable character — used by `textinput_update` (and useful in your
+;; own `update`) to tell "the user typed a letter" apart from "the user
+;; pressed a named/control key".
+pub fn is_special_key(key: string) -> bool is
+    if key == "up" || key == "down" || key == "left" || key == "right" is return true end
+    if key == "home" || key == "end" || key == "pgup" || key == "pgdown" is return true end
+    if key == "delete" || key == "backspace" || key == "tab" || key == "enter" is return true end
+    if key == "esc" || key == "space" is return true end
+    if key.len() >= 5 && key[0..5] == "ctrl+" is return true end
+    return false
+end
+
+;; Block until a key is pressed (bypasses the ~100ms poll window). Handy
+;; for a one-off "press any key to continue" prompt outside the main
+;; `run` loop. Leaves raw mode exactly as it found it.
+pub fn read_key_blocking() -> string is
+    let _r: string = __builtin_process_run("stty min 1 time 0 -F /dev/tty 2>/dev/null")
+    let key: string = poll_key()
+    let _r2: string = __builtin_process_run("stty min 0 time 1 -F /dev/tty 2>/dev/null")
+    return key
+end
+
+
+;; ── messages ─────────────────────────────────────────────────────────────
+
+struct Msg is
+    pub kind: string     ;; "key" | "tick" | "resize" | "quit" | "none" | "custom"
+    pub key: string
+    pub width: int
+    pub height: int
+    pub data: string
+end
+
+pub fn key_msg(key: string) -> any is
+    return Msg { kind: "key", key: key, width: 0, height: 0, data: "" }
+end
+
+pub fn tick_msg(width: int, height: int) -> any is
+    return Msg { kind: "tick", key: "", width: width, height: height, data: "" }
+end
+
+pub fn resize_msg(width: int, height: int) -> any is
+    return Msg { kind: "resize", key: "", width: width, height: height, data: "" }
+end
+
+fn internal_quit_msg() -> any is
+    return Msg { kind: "quit", key: "", width: 0, height: 0, data: "" }
+end
+
+pub fn quit_msg() -> any is
+    return internal_quit_msg()
+end
+
+pub fn none_msg() -> any is
+    return Msg { kind: "none", key: "", width: 0, height: 0, data: "" }
+end
+
+pub fn custom_msg(data: string) -> any is
+    return Msg { kind: "custom", key: "", width: 0, height: 0, data: data }
+end
+
+pub fn msg_kind(m: any) -> string is
+    return m.kind
+end
+
+pub fn msg_key(m: any) -> string is
+    return m.key
+end
+
+pub fn msg_data(m: any) -> string is
+    return m.data
+end
+
+pub fn msg_width(m: any) -> int is
+    return m.width
+end
+
+pub fn msg_height(m: any) -> int is
+    return m.height
+end
+
+pub fn msg_is(m: any, kind: string) -> bool is
+    return m.kind == kind
+end
+
+pub fn msg_is_key(m: any, key: string) -> bool is
+    return m.kind == "key" && m.key == key
+end
+
+pub fn msg_is_any_key(m: any) -> bool is
+    return m.kind == "key"
+end
+
+pub fn msg_is_tick(m: any) -> bool is
+    return m.kind == "tick"
+end
+
+pub fn msg_is_resize(m: any) -> bool is
+    return m.kind == "resize"
+end
+
+pub fn msg_is_quit(m: any) -> bool is
+    return m.kind == "quit"
+end
+
+pub fn msg_is_custom(m: any) -> bool is
+    return m.kind == "custom"
+end
+
+;; True for the handful of keys that conventionally mean "leave the
+;; screen": ctrl+c always, plus "q" and "esc" (only offer those two to
+;; your own `update` as a *suggestion* — e.g. `if tui::should_quit(msg) ...`
+;; — most real apps only want ctrl+c to be unconditional and want "q"/esc
+;; to behave differently depending on which screen/mode they're in).
+pub fn is_ctrl_c(m: any) -> bool is
+    return m.kind == "key" && m.key == "ctrl+c"
+end
+
+
+;; ── commands ─────────────────────────────────────────────────────────────
+;;
+;; A `Cmd` is a zero-argument closure returning the next `Msg`. `run`'s
+;; loop calls the `cmd` returned by `update` right away and feeds its
+;; result back into `update` (bounded — see `run` below), the same shape
+;; as Bubble Tea's `Cmd -> Msg -> Update` cycle, just synchronous instead
+;; of running on a goroutine.
+
+pub fn cmd_none() -> fn() -> any is
+    return || -> any is
+        return none_msg()
+    end
+end
+
+pub fn cmd_quit() -> fn() -> any is
+    return || -> any is
+        return internal_quit_msg()
+    end
+end
+
+pub fn cmd_custom(data: string) -> fn() -> any is
+    return || -> any is
+        return custom_msg(data)
+    end
+end
+
+;; Sleeps `ms` milliseconds (blocking the render loop — there is no
+;; background timer in this synchronous engine) then produces a tick
+;; message. Useful for a deliberate delay between two update steps;
+;; for a steady heartbeat just rely on `run`'s own ~100ms idle tick
+;; instead of chaining `cmd_tick` in a loop.
+pub fn cmd_tick(ms: int) -> fn() -> any is
+    return || -> any is
+        __builtin_time_sleep_ms(ms)
+        return Msg { kind: "tick", key: "", width: 0, height: 0, data: "" }
+    end
+end
+
+
+;; ── the program loop ─────────────────────────────────────────────────────
+;;
+;; `init`   : fn() -> any                 — build the first model
+;; `update` : fn(any, any) -> any         — (model, msg) -> (new_model, cmd) tuple
+;; `view`   : fn(any) -> string           — model -> the frame to draw
+;;
+;; `update`'s return value is a 2-tuple `(new_model, cmd)` — build it with a
+;; plain `return (new_model, cmd)`; `cmd` is one of `tui::cmd_none()`,
+;; `tui::cmd_quit()`, `tui::cmd_custom(data)`, `tui::cmd_tick(ms)`, or any
+;; zero-argument closure of your own returning a `tui` message.
+;;
+;; The loop redraws on every pass: once per keypress, and once per ~100ms
+;; idle tick when no key was pressed (driven by `enable_raw_mode`'s own
+;; `time 1` read timeout) — so a `tui::msg_is_tick` message is how a
+;; spinner or a clock keeps animating with nobody touching the keyboard.
+;;
+;; ctrl+c always exits, unconditionally, straight out of the loop, so a
+;; misbehaving `update` can never strand the terminal in raw mode.
+;;
+;; Returns whatever the final model was when the program quit.
+pub fn run(init: fn() -> any, update: fn(any, any) -> any, view: fn(any) -> string) -> any is
+    let saved: string = enable_raw_mode()
+    enter_alt_screen()
+    hide_cursor()
+
+    let mut model: any = init()
+    let mut running: bool = true
+
+    while running is
+        draw(view(model))
+
+        let key: string = poll_key()
+        let msg: any = if key == "" is
+            tick_msg(term_width(), term_height())
+        else is
+            if key == "ctrl+c" is
+                internal_quit_msg()
+            else is
+                key_msg(key)
+            end
+        end
+
+        if msg_is_quit(msg) is
+            running = false
+        else is
+            let mut cur_msg: any = msg
+            let mut steps: int = 0
+            let mut keep_going: bool = true
+            while keep_going && steps < 8 is
+                let result: any = update(model, cur_msg)
+                let (new_model, cmd) = result
+                model = new_model
+                let next_msg: any = cmd()
+                if msg_is_quit(next_msg) is
+                    running = false
+                    keep_going = false
+                else is
+                    if msg_is(next_msg, "none") is
+                        keep_going = false
+                    else is
+                        cur_msg = next_msg
+                        steps = steps + 1
+                    end
+                end
+            end
+        end
+    end
+
+    show_cursor()
+    exit_alt_screen()
+    flush_out()
+    disable_raw_mode(saved)
+    return model
+end
+
+;; Same loop, but stops feeding `update` a synthetic tick when idle and
+;; instead just blocks waiting for the next key — for apps that only ever
+;; react to keypresses and don't want a background heartbeat at all (a
+;; static menu, a confirmation prompt, ...). `cmd`s are still run the same
+;; bounded (max 8) way as `run`.
+pub fn run_no_tick(init: fn() -> any, update: fn(any, any) -> any, view: fn(any) -> string) -> any is
+    let saved: string = enable_raw_mode()
+    enter_alt_screen()
+    hide_cursor()
+
+    let mut model: any = init()
+    let mut running: bool = true
+
+    while running is
+        draw(view(model))
+
+        let mut key: string = poll_key()
+        while key == "" is
+            key = poll_key()
+        end
+
+        let msg: any = if key == "ctrl+c" is
+            internal_quit_msg()
+        else is
+            key_msg(key)
+        end
+
+        if msg_is_quit(msg) is
+            running = false
+        else is
+            let mut cur_msg: any = msg
+            let mut steps: int = 0
+            let mut keep_going: bool = true
+            while keep_going && steps < 8 is
+                let result: any = update(model, cur_msg)
+                let (new_model, cmd) = result
+                model = new_model
+                let next_msg: any = cmd()
+                if msg_is_quit(next_msg) is
+                    running = false
+                    keep_going = false
+                else is
+                    if msg_is(next_msg, "none") is
+                        keep_going = false
+                    else is
+                        cur_msg = next_msg
+                        steps = steps + 1
+                    end
+                end
+            end
+        end
+    end
+
+    show_cursor()
+    exit_alt_screen()
+    flush_out()
+    disable_raw_mode(saved)
+    return model
+end
+
+
+;; ── colors ───────────────────────────────────────────────────────────────
+;;
+;; A color is one of:
+;;   ""            no color
+;;   "#rrggbb"     24-bit truecolor hex
+;;   "0".."255"    ANSI 256-color palette index
+;;   a name        "black" "red" "green" "yellow" "blue" "magenta" "cyan"
+;;                 "white" "bright_black" "bright_red" ... "bright_white"
+
+fn named_color_code(name: string, base: int) -> string is
+    ;; base is 30 for foreground, 40 for background
+    if name == "black" is return to_string(base + 0) end
+    if name == "red" is return to_string(base + 1) end
+    if name == "green" is return to_string(base + 2) end
+    if name == "yellow" is return to_string(base + 3) end
+    if name == "blue" is return to_string(base + 4) end
+    if name == "magenta" is return to_string(base + 5) end
+    if name == "cyan" is return to_string(base + 6) end
+    if name == "white" is return to_string(base + 7) end
+    if name == "bright_black" is return to_string(base + 60) end
+    if name == "bright_red" is return to_string(base + 61) end
+    if name == "bright_green" is return to_string(base + 62) end
+    if name == "bright_yellow" is return to_string(base + 63) end
+    if name == "bright_blue" is return to_string(base + 64) end
+    if name == "bright_magenta" is return to_string(base + 65) end
+    if name == "bright_cyan" is return to_string(base + 66) end
+    if name == "bright_white" is return to_string(base + 67) end
+    return ""
+end
+
+;; Build the SGR escape for a foreground color (no leading "\x1b[" / no
+;; trailing "m" — callers combine several codes into one escape).
+fn fg_code(color: string) -> string is
+    if color == "" is return "" end
+    if color[0..1] == "#" && color.len() == 7 is
+        let r: int = hex_pair_val(color, 1)
+        let g: int = hex_pair_val(color, 3)
+        let b: int = hex_pair_val(color, 5)
+        return "38;2;" + to_string(r) + ";" + to_string(g) + ";" + to_string(b)
+    end
+    if is_all_digits(color) is
+        return "38;5;" + color
+    end
+    let named: string = named_color_code(color, 30)
+    if named != "" is return named end
+    return ""
+end
+
+fn bg_code(color: string) -> string is
+    if color == "" is return "" end
+    if color[0..1] == "#" && color.len() == 7 is
+        let r: int = hex_pair_val(color, 1)
+        let g: int = hex_pair_val(color, 3)
+        let b: int = hex_pair_val(color, 5)
+        return "48;2;" + to_string(r) + ";" + to_string(g) + ";" + to_string(b)
+    end
+    if is_all_digits(color) is
+        return "48;5;" + color
+    end
+    let named: string = named_color_code(color, 40)
+    if named != "" is return named end
+    return ""
+end
+
+;; Wrap `text` in a foreground-color escape. Handy for one-off coloring
+;; without building a whole `Style`.
+pub fn colorize(text: string, color: string) -> string is
+    let code: string = fg_code(color)
+    if code == "" is return text end
+    return "\x1b[" + code + "m" + text + "\x1b[0m"
+end
+
+
+;; ── style / rendering (a small Lip Gloss-like box model) ────────────────
+
+struct Style is
+    pub fg: string
+    pub bg: string
+    pub bold: bool
+    pub italic: bool
+    pub underline: bool
+    pub width: int          ;; 0 = auto (fit content)
+    pub align: string       ;; "left" | "center" | "right"
+    pub pad_x: int
+    pub pad_y: int
+    pub border: string      ;; "none" | "normal" | "rounded" | "thick" | "double"
+    pub border_color: string
+end
+
+pub fn style_new() -> any is
+    return Style {
+        fg: "", bg: "", bold: false, italic: false, underline: false,
+        width: 0, align: "left", pad_x: 0, pad_y: 0,
+        border: "none", border_color: ""
+    }
+end
+
+pub fn style_fg(s: any, color: string) -> any is
+    return Style {
+        fg: color, bg: s.bg, bold: s.bold, italic: s.italic, underline: s.underline,
+        width: s.width, align: s.align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: s.border, border_color: s.border_color
+    }
+end
+
+pub fn style_bg(s: any, color: string) -> any is
+    return Style {
+        fg: s.fg, bg: color, bold: s.bold, italic: s.italic, underline: s.underline,
+        width: s.width, align: s.align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: s.border, border_color: s.border_color
+    }
+end
+
+pub fn style_bold(s: any, on: bool) -> any is
+    return Style {
+        fg: s.fg, bg: s.bg, bold: on, italic: s.italic, underline: s.underline,
+        width: s.width, align: s.align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: s.border, border_color: s.border_color
+    }
+end
+
+pub fn style_italic(s: any, on: bool) -> any is
+    return Style {
+        fg: s.fg, bg: s.bg, bold: s.bold, italic: on, underline: s.underline,
+        width: s.width, align: s.align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: s.border, border_color: s.border_color
+    }
+end
+
+pub fn style_underline(s: any, on: bool) -> any is
+    return Style {
+        fg: s.fg, bg: s.bg, bold: s.bold, italic: s.italic, underline: on,
+        width: s.width, align: s.align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: s.border, border_color: s.border_color
+    }
+end
+
+pub fn style_width(s: any, w: int) -> any is
+    return Style {
+        fg: s.fg, bg: s.bg, bold: s.bold, italic: s.italic, underline: s.underline,
+        width: w, align: s.align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: s.border, border_color: s.border_color
+    }
+end
+
+pub fn style_align(s: any, align: string) -> any is
+    return Style {
+        fg: s.fg, bg: s.bg, bold: s.bold, italic: s.italic, underline: s.underline,
+        width: s.width, align: align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: s.border, border_color: s.border_color
+    }
+end
+
+pub fn style_padding(s: any, x: int, y: int) -> any is
+    return Style {
+        fg: s.fg, bg: s.bg, bold: s.bold, italic: s.italic, underline: s.underline,
+        width: s.width, align: s.align, pad_x: x, pad_y: y,
+        border: s.border, border_color: s.border_color
+    }
+end
+
+pub fn style_border(s: any, border: string) -> any is
+    return Style {
+        fg: s.fg, bg: s.bg, bold: s.bold, italic: s.italic, underline: s.underline,
+        width: s.width, align: s.align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: border, border_color: s.border_color
+    }
+end
+
+pub fn style_border_color(s: any, color: string) -> any is
+    return Style {
+        fg: s.fg, bg: s.bg, bold: s.bold, italic: s.italic, underline: s.underline,
+        width: s.width, align: s.align, pad_x: s.pad_x, pad_y: s.pad_y,
+        border: s.border, border_color: color
+    }
+end
+
+;; fluent chaining sugar around the functions above — e.g.
+;; `tui::style_new().with_fg("#7dd3fc").with_bold(true).render("hi")`
+impl Style is
+    fn with_fg(self, color: string) -> Style is return style_fg(self, color) end
+    fn with_bg(self, color: string) -> Style is return style_bg(self, color) end
+    fn with_bold(self, on: bool) -> Style is return style_bold(self, on) end
+    fn with_italic(self, on: bool) -> Style is return style_italic(self, on) end
+    fn with_underline(self, on: bool) -> Style is return style_underline(self, on) end
+    fn with_width(self, w: int) -> Style is return style_width(self, w) end
+    fn with_align(self, align: string) -> Style is return style_align(self, align) end
+    fn with_padding(self, x: int, y: int) -> Style is return style_padding(self, x, y) end
+    fn with_border(self, border: string) -> Style is return style_border(self, border) end
+    fn with_border_color(self, color: string) -> Style is return style_border_color(self, color) end
+    fn render(self, text: string) -> string is return style_render(self, text) end
+end
+
+fn sgr_prefix(bold: bool, italic: bool, underline: bool, fg: string, bg: string) -> string is
+    let mut parts: [string] = []
+    if bold is parts.push("1") end
+    if italic is parts.push("3") end
+    if underline is parts.push("4") end
+    let f: string = fg_code(fg)
+    if f != "" is parts.push(f) end
+    let b: string = bg_code(bg)
+    if b != "" is parts.push(b) end
+    if parts.len() == 0 is return "" end
+    return "\x1b[" + iter_join(parts, ";") + "m"
+end
+
+fn align_line(line: string, width: int, align: string) -> string is
+    if align == "center" is return pad_center(line, width) end
+    if align == "right" is return pad_left(line, width) end
+    return pad_right(line, width)
+end
+
+fn max_line_width(lines: [string]) -> int is
+    let mut m: int = 0
+    for l in lines is
+        let w: int = visible_len(l)
+        if w > m is m = w end
+    end
+    return m
+end
+
+;; (horizontal, vertical, top-left, top-right, bottom-left, bottom-right)
+fn border_chars(kind: string) -> (string, string, string, string, string, string) is
+    if kind == "rounded" is return ("─", "│", "╭", "╮", "╰", "╯") end
+    if kind == "thick" is return ("━", "┃", "┏", "┓", "┗", "┛") end
+    if kind == "double" is return ("═", "║", "╔", "╗", "╚", "╝") end
+    return ("─", "│", "┌", "┐", "└", "┘")
+end
+
+;; Render `text` (may be multi-line) through a style: color/attrs, fixed
+;; width + alignment, padding, and an optional border. This doesn't
+;; reflow/word-wrap long lines — it pads short ones and leaves long ones
+;; as-is, same trade-off `std/fmt.h#`'s table helpers make.
+pub fn style_render(s: any, text: string) -> string is
+    let raw_lines: [string] = str_split(text, "\n")
+    let content_width: int = if s.width > 0 is s.width else is max_line_width(raw_lines) end
+    let prefix: string = sgr_prefix(s.bold, s.italic, s.underline, s.fg, s.bg)
+    let reset: string = if prefix == "" is "" else is "\x1b[0m" end
+
+    let mut body: [string] = []
+    let blank: string = rep_str(" ", content_width + s.pad_x * 2)
+    let mut py: int = 0
+    while py < s.pad_y is
+        body.push(prefix + blank + reset)
+        py = py + 1
+    end
+    for line in raw_lines is
+        let aligned: string = align_line(line, content_width, s.align)
+        let inner: string = rep_str(" ", s.pad_x) + aligned + rep_str(" ", s.pad_x)
+        body.push(prefix + inner + reset)
+    end
+    py = 0
+    while py < s.pad_y is
+        body.push(prefix + blank + reset)
+        py = py + 1
+    end
+
+    if s.border == "none" is
+        return iter_join(body, "\n")
+    end
+
+    let (h, v, tl, tr, bl, br) = border_chars(s.border)
+    let border_prefix: string = if s.border_color == "" is "" else is "\x1b[" + fg_code(s.border_color) + "m" end
+    let border_reset: string = if border_prefix == "" is "" else is "\x1b[0m" end
+    let inner_width: int = content_width + s.pad_x * 2
+    let top: string = border_prefix + tl + rep_str(h, inner_width) + tr + border_reset
+    let bottom: string = border_prefix + bl + rep_str(h, inner_width) + br + border_reset
+
+    let mut out: [string] = []
+    out.push(top)
+    for line in body is
+        out.push(border_prefix + v + border_reset + line + border_prefix + v + border_reset)
+    end
+    out.push(bottom)
+    return iter_join(out, "\n")
+end
+
+
+;; ── layout helpers (Lip Gloss-style block joining) ──────────────────────
+
+;; Lay several (possibly multi-line) blocks side by side, `gap` spaces
+;; apart, bottom-padding the shorter ones so ragged heights still line up.
+pub fn join_horizontal(blocks: [string], gap: int) -> string is
+    let mut cols: [[string]] = []
+    let mut widths: [int] = []
+    let mut max_h: int = 0
+    for b in blocks is
+        let ls: [string] = str_split(b, "\n")
+        cols.push(ls)
+        widths.push(max_line_width(ls))
+        if ls.len() > max_h is max_h = ls.len() end
+    end
+    let mut out_lines: [string] = []
+    let mut row: int = 0
+    while row < max_h is
+        let mut line: string = ""
+        let mut bi: int = 0
+        while bi < cols.len() is
+            let ls: [string] = cols[bi]
+            let w: int = widths[bi]
+            let cell: string = if row < ls.len() is pad_right(ls[row], w) else is rep_str(" ", w) end
+            line = line + cell
+            if bi < cols.len() - 1 is
+                line = line + rep_str(" ", gap)
+            end
+            bi = bi + 1
+        end
+        out_lines.push(line)
+        row = row + 1
+    end
+    return iter_join(out_lines, "\n")
+end
+
+;; Stack blocks top to bottom.
+pub fn join_vertical(blocks: [string]) -> string is
+    return iter_join(blocks, "\n")
+end
+
+;; Center a (possibly multi-line) block inside a `width` x `height` box of
+;; spaces.
+pub fn center_block(s: string, width: int, height: int) -> string is
+    let lines: [string] = str_split(s, "\n")
+    let content_h: int = lines.len()
+    let top_pad: int = maxi(0, (height - content_h) / 2)
+    let bottom_pad: int = maxi(0, height - content_h - top_pad)
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < top_pad is
+        out.push(rep_str(" ", width))
+        i = i + 1
+    end
+    for l in lines is
+        out.push(pad_center(l, width))
+    end
+    i = 0
+    while i < bottom_pad is
+        out.push(rep_str(" ", width))
+        i = i + 1
+    end
+    return iter_join(out, "\n")
+end
+
+
+;; ── component: spinner ───────────────────────────────────────────────────
+
+struct Spinner is
+    pub frames: [string]
+    pub frame_idx: int
+    pub style: any
+end
+
+fn spinner_frames_for(kind: string) -> [string] is
+    if kind == "line" is return ["-", "\\", "|", "/"] end
+    if kind == "circle" is return ["◐", "◓", "◑", "◒"] end
+    if kind == "arrow" is return ["←", "↖", "↑", "↗", "→", "↘", "↓", "↙"] end
+    if kind == "bounce" is return ["⠁", "⠂", "⠄", "⠂"] end
+    if kind == "pulse" is return ["∙", "●", "∙"] end
+    if kind == "bar" is return ["▁", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃"] end
+    ;; "dot" (default) — the classic Bubble Tea braille spinner
+    return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+end
+
+;; kind: "dot" (default) | "line" | "circle" | "arrow" | "bounce" | "pulse" | "bar"
+pub fn spinner_new(kind: string) -> any is
+    return Spinner { frames: spinner_frames_for(kind), frame_idx: 0, style: style_new() }
+end
+
+;; Advance to the next frame — call this once per tick you want it to spin.
+pub fn spinner_tick(sp: any) -> any is
+    let n: int = sp.frames.len()
+    return Spinner { frames: sp.frames, frame_idx: (sp.frame_idx + 1) % n, style: sp.style }
+end
+
+pub fn spinner_set_style(sp: any, style: any) -> any is
+    return Spinner { frames: sp.frames, frame_idx: sp.frame_idx, style: style }
+end
+
+pub fn spinner_view(sp: any) -> string is
+    return style_render(sp.style, sp.frames[sp.frame_idx])
+end
+
+
+;; ── component: progress bar ──────────────────────────────────────────────
+
+struct Progress is
+    pub percent: int         ;; 0-100
+    pub width: int
+    pub filled_style: any
+    pub filled_char: string
+    pub empty_char: string
+end
+
+pub fn progress_new(width: int) -> any is
+    return Progress {
+        percent: 0, width: width, filled_style: style_fg(style_new(), "green"),
+        filled_char: "█", empty_char: "░"
+    }
+end
+
+pub fn progress_set(p: any, percent: int) -> any is
+    return Progress {
+        percent: clampi(percent, 0, 100), width: p.width, filled_style: p.filled_style,
+        filled_char: p.filled_char, empty_char: p.empty_char
+    }
+end
+
+pub fn progress_set_style(p: any, style: any) -> any is
+    return Progress {
+        percent: p.percent, width: p.width, filled_style: style,
+        filled_char: p.filled_char, empty_char: p.empty_char
+    }
+end
+
+pub fn progress_percent(p: any) -> int is
+    return p.percent
+end
+
+pub fn progress_view(p: any) -> string is
+    let filled_n: int = (p.width * p.percent) / 100
+    let empty_n: int = p.width - filled_n
+    let bar: string = style_render(p.filled_style, rep_str(p.filled_char, filled_n)) + rep_str(p.empty_char, empty_n)
+    return "[" + bar + "] " + to_string(p.percent) + "%"
+end
+
+
+;; ── component: text input ────────────────────────────────────────────────
+
+struct TextInput is
+    pub value: string
+    pub cursor: int
+    pub placeholder: string
+    pub focused: bool
+    pub style: any
+    pub cursor_style: any
+end
+
+pub fn textinput_new(placeholder: string) -> any is
+    return TextInput {
+        value: "", cursor: 0, placeholder: placeholder, focused: true,
+        style: style_new(), cursor_style: style_fg(style_bg(style_new(), "white"), "black")
+    }
+end
+
+pub fn textinput_value(ti: any) -> string is
+    return ti.value
+end
+
+pub fn textinput_set_value(ti: any, value: string) -> any is
+    return TextInput {
+        value: value, cursor: char_count(value), placeholder: ti.placeholder,
+        focused: ti.focused, style: ti.style, cursor_style: ti.cursor_style
+    }
+end
+
+pub fn textinput_focus(ti: any, on: bool) -> any is
+    return TextInput {
+        value: ti.value, cursor: ti.cursor, placeholder: ti.placeholder,
+        focused: on, style: ti.style, cursor_style: ti.cursor_style
+    }
+end
+
+pub fn textinput_set_style(ti: any, style: any) -> any is
+    return TextInput {
+        value: ti.value, cursor: ti.cursor, placeholder: ti.placeholder,
+        focused: ti.focused, style: style, cursor_style: ti.cursor_style
+    }
+end
+
+;; Feed a `tui` message into the text field. No-ops when unfocused or when
+;; `msg` isn't a key message, so it's always safe to call from `update`
+;; without guarding it yourself.
+pub fn textinput_update(ti: any, msg: any) -> any is
+    if !ti.focused || msg.kind != "key" is return ti end
+    let key: string = msg.key
+    let v: string = ti.value
+    let c: int = ti.cursor
+
+    if key == "backspace" is
+        if c > 0 is return textinput_with(ti, v[0..c - 1] + v[c..v.len()], c - 1) end
+        return ti
+    end
+    if key == "delete" is
+        if c < char_count(v) is return textinput_with(ti, v[0..c] + v[c + 1..v.len()], c) end
+        return ti
+    end
+    let n: int = char_count(v)
+    if key == "left" is return textinput_with(ti, v, maxi(0, c - 1)) end
+    if key == "right" is return textinput_with(ti, v, mini(n, c + 1)) end
+    if key == "home" is return textinput_with(ti, v, 0) end
+    if key == "end" is return textinput_with(ti, v, n) end
+    if key == "ctrl+u" is return textinput_with(ti, v[c..v.len()], 0) end
+    if key == "ctrl+a" is return textinput_with(ti, v, 0) end
+    if key == "ctrl+e" is return textinput_with(ti, v, n) end
+    if key == "space" is return textinput_with(ti, v[0..c] + " " + v[c..v.len()], c + 1) end
+
+    if !is_special_key(key) is
+        let nv: string = v[0..c] + key + v[c..v.len()]
+        return textinput_with(ti, nv, c + char_count(key))
+    end
+    return ti
+end
+
+fn textinput_with(ti: any, value: string, cursor: int) -> any is
+    return TextInput {
+        value: value, cursor: cursor, placeholder: ti.placeholder,
+        focused: ti.focused, style: ti.style, cursor_style: ti.cursor_style
+    }
+end
+
+pub fn textinput_view(ti: any) -> string is
+    if ti.value == "" is
+        if !ti.focused is return style_render(ti.style, ti.placeholder) end
+        return style_render(ti.cursor_style, " ") + style_render(ti.style, ti.placeholder)
+    end
+    if !ti.focused is return style_render(ti.style, ti.value) end
+
+    let before: string = ti.value[0..ti.cursor]
+    let has_at: bool = ti.cursor < char_count(ti.value)
+    let at_cursor: string = if has_at is ti.value[ti.cursor..ti.cursor + 1] else is " " end
+    let after: string = if has_at is ti.value[ti.cursor + 1..ti.value.len()] else is "" end
+    return style_render(ti.style, before) + style_render(ti.cursor_style, at_cursor) + style_render(ti.style, after)
+end
+
+
+;; ── component: viewport (scrollable text area) ───────────────────────────
+
+struct Viewport is
+    pub lines: [string]
+    pub top: int
+    pub width: int
+    pub height: int
+    pub style: any
+end
+
+pub fn viewport_new(width: int, height: int) -> any is
+    return Viewport { lines: [], top: 0, width: width, height: height, style: style_new() }
+end
+
+pub fn viewport_set_content(vp: any, content: string) -> any is
+    return Viewport { lines: str_split(content, "\n"), top: 0, width: vp.width, height: vp.height, style: vp.style }
+end
+
+pub fn viewport_set_style(vp: any, style: any) -> any is
+    return Viewport { lines: vp.lines, top: vp.top, width: vp.width, height: vp.height, style: style }
+end
+
+pub fn viewport_scroll(vp: any, delta: int) -> any is
+    let max_top: int = maxi(0, vp.lines.len() - vp.height)
+    let new_top: int = clampi(vp.top + delta, 0, max_top)
+    return Viewport { lines: vp.lines, top: new_top, width: vp.width, height: vp.height, style: vp.style }
+end
+
+pub fn viewport_at_top(vp: any) -> bool is
+    return vp.top <= 0
+end
+
+pub fn viewport_at_bottom(vp: any) -> bool is
+    return vp.top >= maxi(0, vp.lines.len() - vp.height)
+end
+
+pub fn viewport_update(vp: any, msg: any) -> any is
+    if msg.kind != "key" is return vp end
+    if msg.key == "up" is return viewport_scroll(vp, -1) end
+    if msg.key == "down" is return viewport_scroll(vp, 1) end
+    if msg.key == "pgup" is return viewport_scroll(vp, -vp.height) end
+    if msg.key == "pgdown" is return viewport_scroll(vp, vp.height) end
+    if msg.key == "home" is return viewport_scroll(vp, -vp.lines.len()) end
+    if msg.key == "end" is return viewport_scroll(vp, vp.lines.len()) end
+    return vp
+end
+
+pub fn viewport_view(vp: any) -> string is
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < vp.height is
+        let idx: int = vp.top + i
+        let line: string = if idx < vp.lines.len() is vp.lines[idx] else is "" end
+        out.push(pad_right(line, vp.width))
+        i = i + 1
+    end
+    return style_render(vp.style, iter_join(out, "\n"))
+end
+
+
+;; ── component: selectable list ───────────────────────────────────────────
+
+struct ListModel is
+    pub items: [string]
+    pub cursor: int
+    pub top: int
+    pub height: int
+    pub style: any
+    pub selected_style: any
+end
+
+pub fn list_new(items: [string]) -> any is
+    return ListModel {
+        items: items, cursor: 0, top: 0, height: mini(10, items.len()),
+        style: style_new(), selected_style: style_bold(style_fg(style_new(), "cyan"), true)
+    }
+end
+
+pub fn list_set_height(l: any, height: int) -> any is
+    return ListModel { items: l.items, cursor: l.cursor, top: l.top, height: height, style: l.style, selected_style: l.selected_style }
+end
+
+pub fn list_set_items(l: any, items: [string]) -> any is
+    return ListModel { items: items, cursor: 0, top: 0, height: l.height, style: l.style, selected_style: l.selected_style }
+end
+
+pub fn list_set_style(l: any, style: any, selected_style: any) -> any is
+    return ListModel { items: l.items, cursor: l.cursor, top: l.top, height: l.height, style: style, selected_style: selected_style }
+end
+
+fn list_reclamp(l: any, cursor: int) -> any is
+    let n: int = l.items.len()
+    let c: int = clampi(cursor, 0, maxi(0, n - 1))
+    let mut top: int = l.top
+    if c < top is top = c end
+    if c >= top + l.height is top = c - l.height + 1 end
+    top = clampi(top, 0, maxi(0, n - l.height))
+    return ListModel { items: l.items, cursor: c, top: top, height: l.height, style: l.style, selected_style: l.selected_style }
+end
+
+pub fn list_update(l: any, msg: any) -> any is
+    if msg.kind != "key" is return l end
+    if msg.key == "up" is return list_reclamp(l, l.cursor - 1) end
+    if msg.key == "down" is return list_reclamp(l, l.cursor + 1) end
+    if msg.key == "pgup" is return list_reclamp(l, l.cursor - l.height) end
+    if msg.key == "pgdown" is return list_reclamp(l, l.cursor + l.height) end
+    if msg.key == "home" is return list_reclamp(l, 0) end
+    if msg.key == "end" is return list_reclamp(l, l.items.len() - 1) end
+    return l
+end
+
+pub fn list_selected_index(l: any) -> int is
+    return l.cursor
+end
+
+pub fn list_selected(l: any) -> string is
+    if l.items.len() == 0 is return "" end
+    return l.items[l.cursor]
+end
+
+pub fn list_view(l: any) -> string is
+    let mut out: [string] = []
+    let n: int = l.items.len()
+    let mut i: int = l.top
+    let end_idx: int = mini(n, l.top + l.height)
+    while i < end_idx is
+        let raw: string = l.items[i]
+        if i == l.cursor is
+            out.push(style_render(l.selected_style, "› " + raw))
+        else is
+            out.push("  " + raw)
+        end
+        i = i + 1
+    end
+    return style_render(l.style, iter_join(out, "\n"))
+end
+
+
+;; ── component: paginator ─────────────────────────────────────────────────
+
+struct Paginator is
+    pub page: int          ;; 0-based
+    pub total_pages: int
+    pub active_style: any
+    pub inactive_style: any
+end
+
+pub fn paginator_new(total_pages: int) -> any is
+    return Paginator {
+        page: 0, total_pages: maxi(1, total_pages),
+        active_style: style_fg(style_new(), "cyan"),
+        inactive_style: style_fg(style_new(), "bright_black")
+    }
+end
+
+pub fn paginator_page(p: any) -> int is
+    return p.page
+end
+
+pub fn paginator_set_page(p: any, page: int) -> any is
+    return Paginator {
+        page: clampi(page, 0, p.total_pages - 1), total_pages: p.total_pages,
+        active_style: p.active_style, inactive_style: p.inactive_style
+    }
+end
+
+pub fn paginator_next(p: any) -> any is
+    return paginator_set_page(p, p.page + 1)
+end
+
+pub fn paginator_prev(p: any) -> any is
+    return paginator_set_page(p, p.page - 1)
+end
+
+pub fn paginator_update(p: any, msg: any) -> any is
+    if msg.kind != "key" is return p end
+    if msg.key == "left" is return paginator_prev(p) end
+    if msg.key == "right" is return paginator_next(p) end
+    return p
+end
+
+pub fn paginator_view(p: any) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < p.total_pages is
+        let dot: string = if i == p.page is style_render(p.active_style, "●") else is style_render(p.inactive_style, "○") end
+        out = out + dot
+        if i < p.total_pages - 1 is out = out + " " end
+        i = i + 1
+    end
+    return out
+end
+
+
+;; ── component: help bar ──────────────────────────────────────────────────
+;;
+;; Bindings are given as parallel arrays: `keys[i]` is the short key label
+;; shown ("↑/↓", "enter", "q") and `descriptions[i]` is what it does
+;; ("move", "select", "quit").
+
+pub fn help_view(keys: [string], descriptions: [string]) -> string is
+    let key_style: any = style_bold(style_fg(style_new(), "cyan"), true)
+    let desc_style: any = style_fg(style_new(), "bright_black")
+    let sep_style: any = style_fg(style_new(), "bright_black")
+    let mut parts: [string] = []
+    let n: int = mini(keys.len(), descriptions.len())
+    let mut i: int = 0
+    while i < n is
+        parts.push(style_render(key_style, keys[i]) + " " + style_render(desc_style, descriptions[i]))
+        i = i + 1
+    end
+    return iter_join(parts, style_render(sep_style, "  •  "))
+end
+
+
+;; ── component: timer / stopwatch ─────────────────────────────────────────
+
+struct Timer is
+    pub started_at_ms: int
+    pub stopped_elapsed_ms: int
+    pub running: bool
+end
+
+pub fn timer_new() -> any is
+    return Timer { started_at_ms: __builtin_time_now_ms(), stopped_elapsed_ms: 0, running: true }
+end
+
+pub fn timer_start(t: any) -> any is
+    if t.running is return t end
+    return Timer { started_at_ms: __builtin_time_now_ms() - t.stopped_elapsed_ms, stopped_elapsed_ms: 0, running: true }
+end
+
+pub fn timer_stop(t: any) -> any is
+    if !t.running is return t end
+    return Timer { started_at_ms: t.started_at_ms, stopped_elapsed_ms: __builtin_time_now_ms() - t.started_at_ms, running: false }
+end
+
+pub fn timer_reset(t: any) -> any is
+    return Timer { started_at_ms: __builtin_time_now_ms(), stopped_elapsed_ms: 0, running: true }
+end
+
+pub fn timer_elapsed_ms(t: any) -> int is
+    if t.running is return __builtin_time_now_ms() - t.started_at_ms end
+    return t.stopped_elapsed_ms
+end
+
+;; "mm:ss" formatting of the elapsed time.
+pub fn timer_view(t: any) -> string is
+    let total_s: int = timer_elapsed_ms(t) / 1000
+    let m: int = total_s / 60
+    let s: int = total_s % 60
+    let mm: string = if m < 10 is "0" + to_string(m) else is to_string(m) end
+    let ss: string = if s < 10 is "0" + to_string(s) else is to_string(s) end
+    return mm + ":" + ss
+end
+
+
+;; ── misc ──────────────────────────────────────────────────────────────────
+
+pub fn version() -> string is
+    return "tui 0.1.0 — a Bubble Tea-inspired terminal UI toolkit for H#"
+end
